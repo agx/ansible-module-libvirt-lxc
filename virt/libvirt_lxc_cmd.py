@@ -53,6 +53,14 @@ options:
     description:
       - File creted by this command. If this file already exists the
         command will be skipped. Path is relative to the container root.
+  unless:
+    description:
+      - If this parameter is set, then this command will run unless the
+        command has an exit code of 0
+  onlyif:
+    description:
+      - If this parameter is set, then this command will only run if the
+        command has an exit code of 0
   conn:
     description:
       - cd into this directory before running the command
@@ -70,6 +78,12 @@ EXAMPLES = '''
 - command: /sbin/shutdown -t now
   args:
     container: cont1
+
+# Stop cron inside the container if running
+- command: /bin/systemctl stop cron
+  args:
+    container: cont1
+    onlyif: /bin/systemctl status cron
 '''
 
 VIRSH='virsh'
@@ -102,6 +116,13 @@ def check_exists(creates, domain):
     return os.path.exists(hostpath)
 
 
+def run_command_in_container(cmd, domain):
+    args = shlex.split(cmd)
+    virsh_cmd = ['virsh', '-c', conn, 'lxc-enter-namespace', '--noseclabel',  domain, '--cmd' ] + args
+    rc, out, err = module.run_command(virsh_cmd)
+    return (virsh_cmd, rc, out or '', err or '')
+
+
 def main():
     global conn, module
 
@@ -114,6 +135,8 @@ def main():
             container  = dict(required=True),
             conn       = dict(required=False, default="lxc:///"),
             creates    = dict(required=False),
+            unless     = dict(required=False),
+            onlyif     = dict(required=False),
         )
     )
 
@@ -121,6 +144,8 @@ def main():
     container  = module.params['container']
     conn  = module.params['conn']
     creates = module.params['creates']
+    unless = module.params['unless']
+    onlyif = module.params['onlyif']
 
     if cmd.strip() == '':
         module.fail_json(rc=256, msg="no command given")
@@ -128,11 +153,38 @@ def main():
     args = shlex.split(cmd)
     virsh_args = ['virsh', '-c', conn, 'lxc-enter-namespace', '--noseclabel',  container, '--cmd' ] + args
 
+    if len([x for x in [creates, unless, onlyif] if x is not None]) not in [0, 1]:
+        module.fail_json(msg="Unless, creates and onlyif can't be given at the same time.")
+
     if creates:
         # Do nothing if the file already exists
         if check_exists(creates, container):
             module.exit_json(
                 cmd      = virsh_args,
+                changed  = False,
+            )
+
+    if unless:
+        # Do nothing if unless returns 0
+        cmd, rc, out, err = run_command_in_container(unless, container)
+        if not rc:
+            module.exit_json(
+                msg      = "Skipped since %s return 0" % unless,
+                stdout   = out.rstrip("\r\n"),
+                stderr   = err.rstrip("\r\n"),
+                cmd      = cmd,
+                changed  = False,
+            )
+
+    if onlyif:
+        # Do nothing if unless returns 0
+        cmd, rc, out, err = run_command_in_container(onlyif, container)
+        if rc:
+            module.exit_json(
+                msg      = "Skipped since %s did not return 0" % onlyif,
+                stdout   = out.rstrip("\r\n"),
+                stderr   = err.rstrip("\r\n"),
+                cmd      = cmd,
                 changed  = False,
             )
 
