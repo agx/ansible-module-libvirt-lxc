@@ -18,10 +18,14 @@
 # <http://www.gnu.org/licenses/>.
 
 import sys
+import subprocess
 import datetime
 import traceback
 import shlex
 import os
+
+import xml.etree.ElementTree as ET
+
 
 DOCUMENTATION = '''
 ---
@@ -45,6 +49,10 @@ options:
       - Execute command in this container
     required: true
     default: None
+  creates:
+    description:
+      - File creted by this command. If this file already exists the
+        command will be skipped. Path is relative to the container root.
   conn:
     description:
       - cd into this directory before running the command
@@ -56,14 +64,47 @@ author:
 
 EXAMPLES = '''
 # Run command in container cont1
-- libvirt_lxc_cmd: 
-  cmd: /sbin/shutdown -t now
-  container: cont1
+- libvirt_lxc_cmd: /sbin/shutdown -t now container=cont1
+
+# You can also use the 'args' form to provide the options.
+- command: /sbin/shutdown -t now
+  args:
+    container: cont1
 '''
 
 VIRSH='virsh'
 
+
+def container_root(domain):
+    rc, domxml, err = module.run_command([VIRSH, '-c', conn, 'dumpxml', domain])
+
+    if rc:
+        module.fail_json(msg="Failed to get domain xml for '%s': %s" % (domain, err))
+
+    xmlroot = ET.fromstring(domxml)
+    filesystems = xmlroot.findall(".//devices/filesystem")
+    for fs in filesystems:
+        t = fs.find('target')
+        if t is not None:
+            if t.attrib.get('dir', None) == '/':
+                return fs.find('source').attrib['dir']
+    return None
+
+
+def check_exists(creates, domain):
+    """Return True if the file exists relative to the container root"""
+    root = container_root(domain)
+    if not root:
+        module.fail_json(msg="Failed to get container root for '%s'" % domain)
+    # Make this a relative path, otherwise os.path.join will silently drop
+    # the first part
+    hostpath = os.path.join(root, creates.lstrip('/'))
+    return os.path.exists(hostpath)
+
+
 def main():
+    global conn, module
+
     # the libvirt_lxc_cmd module is the one ansible module that does
     # not take key=value args hence don't copy this one if you are
     # looking to build others!
@@ -72,18 +113,28 @@ def main():
             cmd        = dict(required=True),
             container  = dict(required=True),
             conn       = dict(required=False, default="lxc:///"),
+            creates    = dict(required=False),
         )
     )
 
     cmd = module.params['cmd']
     container  = module.params['container']
     conn  = module.params['conn']
+    creates = module.params['creates']
 
     if cmd.strip() == '':
         module.fail_json(rc=256, msg="no command given")
 
     args = shlex.split(cmd)
     virsh_args = ['virsh', '-c', conn, 'lxc-enter-namespace', '--noseclabel',  container, '--cmd' ] + args
+
+    if creates:
+        # Do nothing if the file already exists
+        if check_exists(creates, container):
+            module.exit_json(
+                cmd      = virsh_args,
+                changed  = False,
+            )
 
     startd = datetime.datetime.now()
     rc, out, err = module.run_command(virsh_args)
