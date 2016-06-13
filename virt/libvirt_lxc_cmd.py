@@ -18,9 +18,7 @@
 # <http://www.gnu.org/licenses/>.
 
 import sys
-import subprocess
 import datetime
-import traceback
 import shlex
 import os
 
